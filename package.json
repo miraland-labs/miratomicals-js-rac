@@ -1,7 +1,7 @@
 {
-  "name": "atomicals-js",
-  "version": "0.1.71",
-  "description": "Atomicals Javascript Library and CLI - atomicals.xyz",
+  "name": "miratomicals-rac-js",
+  "version": "0.1.74",
+  "description": "Miraland resume-after-commit release of Atomicals Javascript Library and CLI - atomicals.xyz",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "typings": "dist/index.d.ts",
@@ -14,7 +14,7 @@
     "postbuild": "echo '#!/usr/bin/env node\n' | cat - dist/cli.js > temp && mv temp dist/cli.js"
   },
   "bin": {
-    "atomicals": "./dist/cli.js"
+    "miratomicals-rac": "./dist/cli.js"
   },
   "repository": {
     "type": "git",

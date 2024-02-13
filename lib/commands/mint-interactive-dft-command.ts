@@ -28,7 +28,13 @@ export class MintInteractiveDftCommand implements CommandInterface {
     this.ticker = this.ticker.startsWith('$') ? this.ticker.substring(1) : this.ticker;
   }
   async run(): Promise<any> {
+
     // Prepare the keys
+    const keypairRaw = ECPair.fromWIF(
+      this.fundingWIF,
+    );
+    const keypair = getKeypairInfo(keypairRaw);
+    
     const filesData: any[] = await prepareArgsMetaCtx(
       {
         mint_ticker: this.ticker,
@@ -77,13 +83,31 @@ export class MintInteractiveDftCommand implements CommandInterface {
     const mint_bitworkr_current_remaining = atomicalDecorated['dft_info']['mint_bitworkr_current_remaining'];
 
     const ticker = atomicalDecorated['$ticker'];
-    const isInfiniteMode = atomicalDecorated['$mint_mode'] == 'infinite';
+    let refundCommitUponMaxMint = false;
+    // const isInfiniteMode = atomicalDecorated['$mint_mode'] == 'infinite';
+    const isInfiniteMode = atomicalDecorated['$mint_mode'] == 'perpetual' || atomicalDecorated['$mint_mode'] == 'infinite';
 
     if (isInfiniteMode) {
       console.log('Infinite minting mode detected, there is no limit')
+      const ibc = this.options.commitBitworkc;
+      if (ibc) {
+        if (this.useCurrentBitwork) {
+          if (ibc != mint_bitworkc_current) {
+            console.log("Latest bitworkc used is NOT EQUAL to the previous commit bitworkc, minting could already entered a new round. Refund is next best action.");
+            refundCommitUponMaxMint = true;
+          }
+        } else {
+          if (ibc != mint_bitworkc_next) {
+            console.log("Latest bitworkc used is NOT EQUAL to the previous commit bitworkc, minting could already entered a new round. Refund is next best action.");
+            refundCommitUponMaxMint = true;
+          }
+        }
+      }
     } else {
       if (atomicalDecorated['dft_info']['mint_count'] >= atomicalDecorated['$max_mints']) {
-        throw new Error(`Decentralized mint for ${ticker} completely minted out!`)
+        // throw new Error(`Decentralized mint for ${ticker} completely minted out!`)
+        console.log(`Decentralized mint for ${ticker} completely minted out! Trying to refund once the previous commit is verified.`)
+        refundCommitUponMaxMint = true;
       } else {
         console.log(`There are already ${mint_count} mints of ${ticker} out of a max total of ${max_mints}.`)
       }
@@ -104,6 +128,11 @@ export class MintInteractiveDftCommand implements CommandInterface {
       meta: this.options.meta,
       ctx: this.options.ctx,
       init: this.options.init,
+      commitTime: this.options.commitTime,
+      commitNonce: this.options.commitNonce,
+      commitScriptPubKey: this.options.commitScriptPubKey,
+      commitBitworkc: this.options.commitBitworkc,
+      refundCommitUponMaxMint,
     });
 
     // Attach any default data
@@ -140,10 +169,11 @@ export class MintInteractiveDftCommand implements CommandInterface {
         atomicalBuilder.setBitworkReveal(mint_bitworkr);
       }
     }
-   
+
     // The receiver output of the deploy
     atomicalBuilder.addOutput({
-      address: this.address,
+      // address: this.address,
+      address: refundCommitUponMaxMint ? keypair.address : this.address,
       value: perAmountMint
     })
 

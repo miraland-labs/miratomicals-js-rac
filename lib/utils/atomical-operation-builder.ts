@@ -77,10 +77,17 @@ export const INPUT_BYTES_BASE = 57.5;
 export const OUTPUT_BYTES_BASE = 43;
 export const EXCESSIVE_FEE_LIMIT: number = 1000000; // Limit to 1/100 of a BTC for now
 export const MAX_SEQUENCE = 0xffffffff;
+export const SEQ_RANGE_BUCKET = 100000000;
 
 interface WorkerOut {
     finalCopyData: AtomicalsPayload;
     finalSequence: number;
+}
+
+interface RevealerOut {
+    finalCopyData: AtomicalsPayload;
+    solutionTime: number;
+    solutionSequence: number;
 }
 
 export enum REALM_CLAIM_TYPE {
@@ -220,6 +227,11 @@ export interface AtomicalOperationBuilderOptions {
     splatOptions?: {
         satsoutput: number;
     };
+    commitTime?: number;
+    commitNonce?: number;
+    commitScriptPubKey?: string;
+    commitBitworkc?: string;
+    refundCommitUponMaxMint?: boolean;
 }
 
 export class AtomicalOperationBuilder {
@@ -620,23 +632,7 @@ export class AtomicalOperationBuilder {
             }; // Also supports one parent for now
         }
 
-        if (this.options.satsbyte == -1) {
-            const response: { result } = await this.options.electrumApi.estimateFee(1);
-            let estimatedSatsByte = Math.ceil((response.result / 1000) * 100000000);
-            if (isNaN(estimatedSatsByte)) {
-                estimatedSatsByte = 200; // Something went wrong, just default to 30 bytes sat estimate
-                console.log('satsbyte fee query failed, defaulted to: ', estimatedSatsByte)
-            } else {
-                this.options.satsbyte = estimatedSatsByte; 
-                console.log('satsbyte fee auto-detected to: ', estimatedSatsByte)
-            }
-        } else {
-            console.log('satsbyte fee manually set to: ', this.options.satsbyte)
-        }
-
         let unixtime = Math.floor(Date.now() / 1000);
-        let nonce = Math.floor(Math.random() * 10000000);
-        let noncesGenerated = 0;
         let atomicalId: string | null = null;
         let commitTxid: string | null = null;
         let revealTxid: string | null = null;
@@ -644,9 +640,8 @@ export class AtomicalOperationBuilder {
 
         // Placeholder for only estimating tx deposit fee size.
         if (performBitworkForCommitTx) {
-            // Use zero nonce in order for recoverable real addresses.
-            copiedData["args"]["nonce"] = 0;
-            copiedData["args"]["time"] = unixtime;
+            copiedData["args"]["nonce"] = this.options.commitNonce;
+            copiedData["args"]["time"] = this.options.commitTime;
         }
 
         console.log("copiedData", copiedData);
@@ -659,6 +654,8 @@ export class AtomicalOperationBuilder {
 
         if (payloadSize <= 1000) {
             console.log("Payload Encoded: ", copiedData);
+            // MI, debug purpose.
+            console.log("Payload CBOR: ", mockAtomPayload.cbor().toString('hex')); // .match(/../g).join(' '));
         }
 
         const mockBaseCommitForFeeCalculation: { scriptP2TR; hashLockP2TR } =
@@ -670,198 +667,25 @@ export class AtomicalOperationBuilder {
         const fees: FeeCalculations =
             this.calculateFeesRequiredForAccumulatedCommitAndReveal(
                 mockBaseCommitForFeeCalculation.hashLockP2TR.redeem.output.length,
-              performBitworkForRevealTx
+                performBitworkForRevealTx
             );
 
-        ////////////////////////////////////////////////////////////////////////
-        // Begin Commit Transaction
-        ////////////////////////////////////////////////////////////////////////
+        // ////////////////////////////////////////////////////////////////////////
+        // // Commit Transaction Completed. This step skipped.
+        // ////////////////////////////////////////////////////////////////////////
 
-        if (performBitworkForCommitTx) {
-            // Attempt to get funding UTXO information
-            const fundingUtxo = await getFundingUtxo(
-                this.options.electrumApi,
-                fundingKeypair.address,
-                fees.commitAndRevealFeePlusOutputs
-            );
+        scriptP2TR = mockBaseCommitForFeeCalculation.scriptP2TR;
+        hashLockP2TR = mockBaseCommitForFeeCalculation.hashLockP2TR;
 
-            // Log bitwork info if available
-            printBitworkLog(this.bitworkInfoCommit as any, true);
-
-            // Close the electrum API connection
-            this.options.electrumApi.close();
-
-            // Set the default concurrency level to the number of CPU cores minus 1
-            const defaultConcurrency = os.cpus().length - 1;
-            // Read the concurrency level from .env file
-            const envConcurrency = process.env.CONCURRENCY
-                ? parseInt(process.env.CONCURRENCY, 10)
-                : -1;
-            // Use envConcurrency if it is a positive number; otherwise, use defaultConcurrency
-            const concurrency = envConcurrency > 0
-                ? envConcurrency
-                : defaultConcurrency;
-            // Logging the set concurrency level to the console
-            console.log(`Concurrency set to: ${concurrency}`);
-            const workerOptions = this.options;
-            const workerBitworkInfoCommit = this.bitworkInfoCommit;
-
-            let workers: Worker[] = [];
-            let resolveWorkerPromise;
-
-            // Create a promise to await the completion of worker tasks
-            const workerPromise = new Promise((resolve) => {
-                resolveWorkerPromise = resolve;
-            });
-
-            let isWorkDone = false;
-
-            // Function to stop all worker threads
-            const stopAllWorkers = () => {
-                workers.forEach((worker) => {
-                    worker.terminate();
-                });
-                workers = [];
-            };
-
-            // Calculate the range of sequences to be assigned to each worker
-            const seqRangePerWorker = Math.floor(MAX_SEQUENCE / concurrency);
-
-            // Initialize and start worker threads
-            for (let i = 0; i < concurrency; i++) {
-                console.log("Initializing worker: " + i);
-                const worker = new Worker("./dist/utils/miner-worker.js");
-
-                // Handle messages from workers
-                worker.on("message", async (message: WorkerOut) => {
-                    console.log("Solution found, try composing the transaction...");
-
-                    if (!isWorkDone) {
-                        isWorkDone = true;
-                        stopAllWorkers();
-
-                        const atomPayload = new AtomicalsPayload(
-                            message.finalCopyData
-                        );
-
-                        const updatedBaseCommit: {
-                            scriptP2TR;
-                            hashLockP2TR;
-                            hashscript;
-                        } = prepareCommitRevealConfig(
-                            workerOptions.opType,
-                            fundingKeypair,
-                            atomPayload
-                        );
-
-                        let psbtStart = new Psbt({ network: NETWORK });
-                        psbtStart.setVersion(1);
-
-                        psbtStart.addInput({
-                            hash: fundingUtxo.txid,
-                            index: fundingUtxo.index,
-                            sequence: message.finalSequence,
-                            tapInternalKey: Buffer.from(
-                                fundingKeypair.childNodeXOnlyPubkey as number[]
-                            ),
-                            witnessUtxo: {
-                                value: fundingUtxo.value,
-                                script: Buffer.from(fundingKeypair.output, "hex"),
-                            },
-                        });
-                        psbtStart.addOutput({
-                            address: updatedBaseCommit.scriptP2TR.address,
-                            value: this.getOutputValueForCommit(fees),
-                        });
-
-                        this.addCommitChangeOutputIfRequired(
-                            fundingUtxo.value,
-                            fees,
-                            psbtStart,
-                            fundingKeypair.address
-                        );
-
-                        psbtStart.signInput(0, fundingKeypair.tweakedChildNode);
-                        psbtStart.finalizeAllInputs();
-
-                        const interTx = psbtStart.extractTransaction();
-
-                        const rawtx = interTx.toHex();
-                        await AtomicalOperationBuilder.finalSafetyCheckForExcessiveFee(
-                            psbtStart,
-                            interTx
-                        );
-                        if (!this.broadcastWithRetries(rawtx)) {
-                            console.log("Error sending", interTx.getId(), rawtx);
-                            throw new Error(
-                                "Unable to broadcast commit transaction after attempts: " +
-                                    interTx.getId()
-                            );
-                        } else {
-                            console.log("Success sent tx: ", interTx.getId());
-                        }
-
-                        commitMinedWithBitwork = true;
-                        performBitworkForCommitTx = false;
-                        // In both scenarios we copy over the args
-                        if (!performBitworkForCommitTx) {
-                            scriptP2TR = updatedBaseCommit.scriptP2TR;
-                            hashLockP2TR = updatedBaseCommit.hashLockP2TR;
-                        }
-
-                        // Resolve the worker promise with the received message
-                        resolveWorkerPromise(message);
-                    }
-                });
-                worker.on("error", (error) => {
-                    console.error("worker error: ", error);
-                    if (!isWorkDone) {
-                        isWorkDone = true;
-                        stopAllWorkers();
-                    }
-                });
-
-                worker.on("exit", (code) => {
-                    if (code !== 0) {
-                        console.error(`Worker stopped with exit code ${code}`);
-                    }
-                });
-
-                // Calculate sequence range for this worker
-                const seqStart = i * seqRangePerWorker;
-                let seqEnd = seqStart + seqRangePerWorker - 1;
-
-                // Ensure the last worker covers the remaining range
-                if (i === concurrency - 1) {
-                    seqEnd = MAX_SEQUENCE - 1;
-                }
-
-                // Send necessary data to the worker
-                const messageToWorker = {
-                    copiedData,
-                    seqStart,
-                    seqEnd,
-                    workerOptions,
-                    fundingWIF,
-                    fundingUtxo,
-                    fees,
-                    performBitworkForCommitTx,
-                    workerBitworkInfoCommit,
-                    scriptP2TR,
-                    hashLockP2TR,
-                };
-                worker.postMessage(messageToWorker);
-                workers.push(worker);
-            }
-
-            console.log("Stay calm and grab a drink! Miner workers have started mining... ");
-
-            // Await results from workers
-            const messageFromWorker = await workerPromise;
-            console.log("Workers have completed their tasks.");
-        } else {
-            scriptP2TR = mockBaseCommitForFeeCalculation.scriptP2TR;
-            hashLockP2TR = mockBaseCommitForFeeCalculation.hashLockP2TR;
+        if (hashLockP2TR.output.toString('hex') == this.options.commitScriptPubKey) {
+            console.log(`The previous commit was verified successfully with time: ${this.options.commitTime}, nonce: ${this.options.commitNonce}`);
+        } else if (!this.options.refundCommitUponMaxMint) {
+            console.log(`The time and nonce matched scriptPubKey: ${hashLockP2TR.output.toString('hex')}`);
+            console.log(`The expected commit output scriptPubKey: ${this.options.commitScriptPubKey}`);
+            console.log(`The previous commit cannot be verified with provided time: ${this.options.commitTime}, nonce: ${this.options.commitNonce}`);
+            console.log("Please make sure both time and nonce match with your commit transaction.");
+            
+            return {success: false};
         }
 
         ////////////////////////////////////////////////////////////////////////
@@ -879,22 +703,361 @@ export class AtomicalOperationBuilder {
         commitTxid = utxoOfCommitAddress.txid;
         atomicalId = commitTxid + "i0"; // Atomicals are always minted at the 0'th output
 
-        const tapLeafScript = {
-            leafVersion: hashLockP2TR.redeem.redeemVersion,
-            script: hashLockP2TR.redeem.output,
-            controlBlock:
-                hashLockP2TR.witness![hashLockP2TR.witness!.length - 1],
-        };
+        let shouldBroadcast = !performBitworkForRevealTx;
 
-        if (performBitworkForRevealTx) {
+        if (performBitworkForRevealTx && !this.options.refundCommitUponMaxMint) {
+            // leave optional arg commit with default(false), for bitworkr
             printBitworkLog(this.bitworkInfoReveal as any);
-        }
-        noncesGenerated = 0;
-        do {
+
+            // leverage multi-threads
+            // Close the electrum API connection
+            this.options.electrumApi.close();
+
+            // Set the default concurrency level to the number of CPU cores minus 1
+            const defaultConcurrency = os.cpus().length - 1;
+            // Read the concurrency level from .env file
+            const envConcurrency = process.env.CONCURRENCY
+                ? parseInt(process.env.CONCURRENCY, 10)
+                : -1;
+            // Use envConcurrency if it is a positive number; otherwise, use defaultConcurrency
+            const concurrency =
+                envConcurrency > 0 ? envConcurrency : defaultConcurrency;
+            // Logging the set concurrency level to the console
+            console.log(`Concurrency set to: ${concurrency}`);
+            const revealerOptions = this.options;
+            const revealerBitworkInfoReveal = this.bitworkInfoReveal;
+            const revealerInputUtxos = this.inputUtxos;
+            const revealerAdditionalOutputs = this.additionalOutputs;
+
+            let revealers: Worker[] = [];
+            let resolveRevealerPromise;
+
+            // Create a promise to await the completion of revealer tasks
+            const revealerPromise = new Promise((resolve) => {
+                resolveRevealerPromise = resolve;
+            });
+
+            let isWorkDone = false;
+
+            // Function to stop all worker threads
+            const stopAllRevealers = () => {
+                revealers.forEach((revealer) => {
+                    revealer.terminate();
+                });
+                revealers = [];
+            };
+
+            // Calculate the range of sequences to be assigned to each revealer
+            const seqRangePerRevealer = Math.floor(
+                SEQ_RANGE_BUCKET / concurrency
+            );
+
+            // Initialize and start revealer threads
+            for (let i = 0; i < concurrency; i++) {
+                console.log("Initializing revealer: " + i);
+                const revealer = new Worker("./dist/utils/miner-revealer.js");
+
+                // Handle messages from revealers
+                revealer.on("message", async (message: RevealerOut) => {
+                    console.log(
+                        "Solution found for reveal step, try composing the transaction..."
+                    );
+
+                    if (!isWorkDone) {
+                        isWorkDone = true;
+                        stopAllRevealers();
+
+                        // Extract parameters from the message
+                        const {
+                            finalCopyData,
+                            solutionTime,
+                            solutionSequence,
+                        } = message;
+
+                        const atomPayload = new AtomicalsPayload(finalCopyData);
+
+                        const tapLeafScript = {
+                            leafVersion: hashLockP2TR.redeem.redeemVersion,
+                            script: hashLockP2TR.redeem.output,
+                            controlBlock:
+                                hashLockP2TR.witness![
+                                    hashLockP2TR.witness!.length - 1
+                                ],
+                        };
+
+                        let totalInputsforReveal = 0; // We calculate the total inputs for the reveal to determine to make change output or not
+                        let totalOutputsForReveal = 0; // Calculate total outputs for the reveal and compare to totalInputsforReveal and reveal fee
+                        let psbtStart = new Psbt({ network: NETWORK });
+                        psbtStart.setVersion(1);
+
+                        psbtStart.addInput({
+                            sequence: this.options.rbf
+                                ? RBF_INPUT_SEQUENCE
+                                : undefined,
+                            hash: utxoOfCommitAddress.txid,
+                            index: utxoOfCommitAddress.vout, // .index or .vout, both are same value
+                            witnessUtxo: {
+                                value: utxoOfCommitAddress.value,
+                                script: hashLockP2TR.output!,
+                            },
+                            tapLeafScript: [tapLeafScript],
+                        });
+                        totalInputsforReveal += utxoOfCommitAddress.value;
+
+                        // Add any additional inputs that were assigned
+                        for (const additionalInput of this.inputUtxos) {
+                            psbtStart.addInput({
+                                sequence: this.options.rbf
+                                    ? RBF_INPUT_SEQUENCE
+                                    : undefined,
+                                hash: additionalInput.utxo.hash,
+                                index: additionalInput.utxo.index,
+                                witnessUtxo: additionalInput.utxo.witnessUtxo,
+                                tapInternalKey:
+                                    additionalInput.keypairInfo
+                                        .childNodeXOnlyPubkey,
+                            });
+                            totalInputsforReveal +=
+                                additionalInput.utxo.witnessUtxo.value;
+                        }
+
+                        // Note, we do not assign any outputs by default.
+                        // The caller must decide how many outputs to assign always
+                        // The reason is the caller knows the context to create them in
+                        // Add any additional outputs that were assigned
+                        for (const additionalOutput of this.additionalOutputs) {
+                            psbtStart.addOutput({
+                                address: additionalOutput.address,
+                                value: additionalOutput.value,
+                            });
+                            totalOutputsForReveal += additionalOutput.value;
+                        }
+
+                        if (parentAtomicalInfo) {
+                            psbtStart.addInput({
+                                sequence: this.options.rbf
+                                    ? RBF_INPUT_SEQUENCE
+                                    : undefined,
+                                hash: parentAtomicalInfo.parentUtxoPartial.hash,
+                                index: parentAtomicalInfo.parentUtxoPartial
+                                    .index,
+                                witnessUtxo:
+                                    parentAtomicalInfo.parentUtxoPartial
+                                        .witnessUtxo,
+                                tapInternalKey:
+                                    parentAtomicalInfo.parentKeyInfo
+                                        .childNodeXOnlyPubkey,
+                            });
+                            totalInputsforReveal +=
+                                parentAtomicalInfo.parentUtxoPartial.witnessUtxo
+                                    .value;
+                            psbtStart.addOutput({
+                                address:
+                                    parentAtomicalInfo.parentKeyInfo.address,
+                                value: parentAtomicalInfo.parentUtxoPartial
+                                    .witnessUtxo.value,
+                            });
+                            totalOutputsForReveal +=
+                                parentAtomicalInfo.parentUtxoPartial.witnessUtxo
+                                    .value;
+                        }
+
+                        const data = Buffer.from(
+                            solutionTime + ":" + solutionSequence,
+                            "utf8"
+                        );
+                        const embed = bitcoin.payments.embed({ data: [data] });
+
+                        if (performBitworkForRevealTx) {
+                            psbtStart.addOutput({
+                                script: embed.output!,
+                                value: 0,
+                            });
+                        }
+                        this.addRevealOutputIfChangeRequired(
+                            totalInputsforReveal,
+                            totalOutputsForReveal,
+                            fees.revealFeeOnly,
+                            psbtStart,
+                            fundingKeypair.address
+                        );
+
+                        psbtStart.signInput(0, fundingKeypair.childNode);
+                        // Sign all the additional inputs, if there were any
+                        let signInputIndex = 1;
+                        for (const additionalInput of this.inputUtxos) {
+                            psbtStart.signInput(
+                                signInputIndex,
+                                additionalInput.keypairInfo.tweakedChildNode
+                            );
+                            signInputIndex++;
+                        }
+                        if (parentAtomicalInfo) {
+                            console.log(
+                                "parentAtomicalInfo",
+                                parentAtomicalInfo
+                            );
+                            psbtStart.signInput(
+                                signInputIndex,
+                                parentAtomicalInfo.parentKeyInfo
+                                    .tweakedChildNode
+                            );
+                        }
+                        // We have to construct our witness script in a custom finalizer
+                        const customFinalizer = (
+                            _inputIndex: number,
+                            input: any
+                        ) => {
+                            const scriptSolution = [
+                                input.tapScriptSig[0].signature,
+                            ];
+                            const witness = scriptSolution
+                                .concat(tapLeafScript.script)
+                                .concat(tapLeafScript.controlBlock);
+                            return {
+                                finalScriptWitness:
+                                    witnessStackToScriptWitness(witness),
+                            };
+                        };
+                        psbtStart.finalizeInput(0, customFinalizer);
+                        // Finalize all the additional inputs, if there were any
+                        let finalizeInputIndex = 1;
+                        for (
+                            ;
+                            finalizeInputIndex <= this.inputUtxos.length;
+                            finalizeInputIndex++
+                        ) {
+                            psbtStart.finalizeInput(finalizeInputIndex);
+                        }
+                        if (parentAtomicalInfo) {
+                            psbtStart.finalizeInput(finalizeInputIndex);
+                        }
+
+                        const revealTx = psbtStart.extractTransaction();
+                        const checkTxid = revealTx.getId();
+                        if (
+                            hasValidBitwork(
+                                checkTxid,
+                                this.bitworkInfoReveal?.prefix as any,
+                                this.bitworkInfoReveal?.ext as any
+                            )
+                        ) {
+                            process.stdout.clearLine(0);
+                            process.stdout.cursorTo(0);
+                            process.stdout.write(
+                                chalk.green(
+                                    checkTxid,
+                                    " solution time: " + solutionTime,
+                                    " solution sequence: " + solutionSequence
+                                )
+                            );
+                            console.log(
+                                "\nBitwork matches reveal txid! ",
+                                revealTx.getId(),
+                                "@ time: " + Math.floor(Date.now() / 1000)
+                            );
+                            shouldBroadcast = true;
+                        }
+                        // Broadcast either because there was no bitwork requested, and we are done. OR...
+                        // broadcast because we found the bitwork and it is ready to be broadcasted
+                        if (shouldBroadcast) {
+                            await AtomicalOperationBuilder.finalSafetyCheckForExcessiveFee(
+                                psbtStart,
+                                revealTx
+                            );
+                            console.log(
+                                "\nBroadcasting tx...",
+                                revealTx.getId()
+                            );
+                            const interTx = psbtStart.extractTransaction();
+                            const rawtx = interTx.toHex();
+                            if (!this.broadcastWithRetries(rawtx)) {
+                                console.log(
+                                    "Error sending",
+                                    revealTx.getId(),
+                                    rawtx
+                                );
+                                throw new Error(
+                                    "Unable to broadcast reveal transaction after attempts"
+                                );
+                            } else {
+                                console.log(
+                                    "Success sent tx: ",
+                                    revealTx.getId()
+                                );
+                            }
+                            revealTxid = interTx.getId();
+                            performBitworkForRevealTx = false; // Done
+                        }
+                    }
+
+                    // Resolve the revealer promise with the received message
+                    resolveRevealerPromise(message);
+                });
+                revealer.on("error", (error) => {
+                    console.error("revealer error: ", error);
+                    if (!isWorkDone) {
+                        isWorkDone = true;
+                        stopAllRevealers();
+                    }
+                });
+                revealer.on("exit", (code) => {
+                    if (code !== 0) {
+                        console.error(
+                            `Revealer stopped with exit code ${code}`
+                        );
+                    }
+                });
+
+                // Calculate sequence range for this revealer
+                const seqStart = i * seqRangePerRevealer;
+                let seqEnd = seqStart + seqRangePerRevealer - 1;
+
+                // Ensure the last revealer covers the remaining range of the initial bucket
+                if (i === concurrency - 1) {
+                    seqEnd = SEQ_RANGE_BUCKET - 1;
+                }
+
+                // Send necessary data to the revealer
+                const messageToRevealer = {
+                    copiedData,
+                    seqStart,
+                    seqEnd,
+                    revealerOptions,
+                    fundingWIF,
+                    utxoOfCommitAddress,
+                    fees,
+                    performBitworkForRevealTx,
+                    revealerBitworkInfoReveal,
+                    revealerInputUtxos,
+                    revealerAdditionalOutputs,
+                    parentAtomicalInfo,
+                    scriptP2TR,
+                    hashLockP2TR,
+                };
+                revealer.postMessage(messageToRevealer);
+                revealers.push(revealer);
+            }
+
+            console.log(
+                "\nDon't despair, it still takes some time! Miner revealers have started mining...\n"
+            );
+
+            // Await results from revealers
+            const messageFromRevealer = await revealerPromise;
+            console.log(
+                "\nRevealers have completed their tasks for the reveal transaction.\n"
+            );
+        } else {
+            // performBitworkForRevealTx == false or refund from commit to funding address due to max mint reached
+            const tapLeafScript = {
+                leafVersion: hashLockP2TR.redeem.redeemVersion,
+                script: hashLockP2TR.redeem.output,
+                controlBlock:
+                    hashLockP2TR.witness![hashLockP2TR.witness!.length - 1],
+            };
             let totalInputsforReveal = 0; // We calculate the total inputs for the reveal to determine to make change output or not
             let totalOutputsForReveal = 0; // Calculate total outputs for the reveal and compare to totalInputsforReveal and reveal fee
-            let nonce = Math.floor(Math.random() * 100000000);
-            let unixTime = Math.floor(Date.now() / 1000);
             let psbt = new Psbt({ network: NETWORK });
             psbt.setVersion(1);
             psbt.addInput({
@@ -955,22 +1118,11 @@ export class AtomicalOperationBuilder {
                     parentAtomicalInfo.parentUtxoPartial.witnessUtxo.value;
             }
 
-            if (noncesGenerated % 10000 == 0) {
-                unixTime = Math.floor(Date.now() / 1000);
-            }
-            const data = Buffer.from(unixTime + ":" + nonce, "utf8");
-            const embed = bitcoin.payments.embed({ data: [data] });
-
-            if (performBitworkForRevealTx) {
-                psbt.addOutput({
-                    script: embed.output!,
-                    value: 0,
-                });
-            }
             this.addRevealOutputIfChangeRequired(
                 totalInputsforReveal,
                 totalOutputsForReveal,
                 fees.revealFeeOnly,
+                psbt,
                 fundingKeypair.address
             );
 
@@ -1017,34 +1169,9 @@ export class AtomicalOperationBuilder {
 
             const revealTx = psbt.extractTransaction();
             const checkTxid = revealTx.getId();
-            logMiningProgressToConsole(
-                performBitworkForRevealTx,
-                this.options.disableMiningChalk,
-                checkTxid,
-                noncesGenerated
-            );
-            let shouldBroadcast = !performBitworkForRevealTx;
-            if (
-                performBitworkForRevealTx &&
-                hasValidBitwork(
-                    checkTxid,
-                    this.bitworkInfoReveal?.prefix as any,
-                    this.bitworkInfoReveal?.ext as any
-                )
-            ) {
-                process.stdout.clearLine(0);
-                process.stdout.cursorTo(0);
-                process.stdout.write(
-                    chalk.green(checkTxid, " nonces: " + noncesGenerated)
-                );
-                console.log(
-                    "\nBitwork matches reveal txid! ",
-                    revealTx.getId(),
-                    "@ time: " + Math.floor(Date.now() / 1000)
-                );
-                shouldBroadcast = true;
-            }
-            // Broadcast either because there was no bitwork requested, and we are done. OR...
+
+            shouldBroadcast = true;
+            // Broadcast either because there was no bitwork requested, and we are done with bitwork.
             // broadcast because we found the bitwork and it is ready to be broadcasted
             if (shouldBroadcast) {
                 console.log("\nPrint raw tx in case of broadcast failure", revealTx.toHex());
@@ -1064,11 +1191,8 @@ export class AtomicalOperationBuilder {
                     console.log("Success sent tx: ", revealTx.getId());
                 }
                 revealTxid = interTx.getId();
-                performBitworkForRevealTx = false; // Done
             }
-            nonce++;
-            noncesGenerated++;
-        } while (performBitworkForRevealTx);
+        }
 
         const ret = {
             success: true,
@@ -1158,7 +1282,8 @@ export class AtomicalOperationBuilder {
         // Total: 41 + 25 = 66
         //-----------------------------------------
         // OP_RETURN size
-        // 8-bytes value, a one-byte script’s size
+        // 8-bytes value(roughly estimate), a one-byte script’s size
+        // actual value size depends precisely on final nonce
         const OP_RETURN_BYTES: number = 21 + 8 + 1;
         //-----------------------------------------
         const REVEAL_INPUT_BYTES_BASE = 66;
@@ -1191,7 +1316,7 @@ export class AtomicalOperationBuilder {
     }
 
     calculateFeesRequiredForCommit(): number {
-        let fees =  Math.ceil(
+        let fees = Math.ceil(
             (this.options.satsbyte as any) *
                 (BASE_BYTES + 1 * INPUT_BYTES_BASE + 1 * OUTPUT_BYTES_BASE)
         );
@@ -1243,6 +1368,7 @@ export class AtomicalOperationBuilder {
         totalInputsValue: number,
         totalOutputsValue: number,
         revealFee: number,
+        pbst: any,
         address: string
     ) {
         const currentSatoshisFeePlanned = totalInputsValue - totalOutputsValue;
@@ -1261,7 +1387,7 @@ export class AtomicalOperationBuilder {
         }
         // There were some excess satoshis, but let's verify that it meets the dust threshold to make change
         if (excessSatoshisFound >= DUST_AMOUNT) {
-            this.addOutput({
+            pbst.addOutput({
                 address: address,
                 value: excessSatoshisFound,
             });

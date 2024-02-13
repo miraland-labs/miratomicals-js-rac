@@ -76,6 +76,7 @@ if (parentPort) {
         const fundingKeypairRaw = ECPair.fromWIF(fundingWIF);
         const fundingKeypair = getKeypairInfo(fundingKeypairRaw);
 
+        // copiedData["args"]["nonce"] = Math.floor(Math.random() * 10000000);
         copiedData["args"]["time"] = Math.floor(Date.now() / 1000);
 
         let atomPayload = new AtomicalsPayload(copiedData);
@@ -135,7 +136,7 @@ if (parentPort) {
             }
             if (sequence % 10000 == 0) {
                 console.log(
-                    "Started mining for sequence: " +
+                    "Started commit stage mining for sequence: " +
                         sequence +
                         " - " +
                         Math.min(sequence + 10000, MAX_SEQUENCE)
@@ -182,7 +183,9 @@ if (parentPort) {
             ) {
                 // Valid proof of work found, log success message
                 console.log(
-                    chalk.green(prelimTx.getId(), ` sequence: (${sequence})`)
+                    // chalk.green(prelimTx.getId(), ` sequence: (${sequence})`)
+                    chalk.green(prelimTx.getId(), ` sequence: (${sequence})`,
+                        ` time: (${copiedData["args"]["time"]})`, ` nonce: (${copiedData["args"]["nonce"]})`)
                 );
                 console.log(
                     "\nBitwork matches commit txid! ",

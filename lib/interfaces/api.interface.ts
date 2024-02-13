@@ -17,6 +17,10 @@ export interface BaseRequestOptions {
     parentOwner?: IWalletRecord;
     disableMiningChalk?: boolean;
     disableautoencode?: boolean;
+    commitTime?: number;
+    commitNonce?: number;
+    commitScriptPubKey?: string;
+    commitBitworkc?: string;
 }
 
 export const BASE_REQUEST_OPTS_DEFAULTS = {
@@ -35,7 +39,7 @@ export interface APIInterface {
 
     // Mint fungible-token methods (FT)
     mintFtInteractive(options: BaseRequestOptions, file: string, supply: number, address: string, requestTicker: string, WIF: string): Promise<CommandResultInterface>;
-    mintDftInteractive(options: BaseRequestOptions, address: string, ticker: string, WIF: string): Promise<CommandResultInterface>;
+    mintDftInteractive(options: BaseRequestOptions, address: string, ticker: string, WIF: string, mineCurrentBitwork?: boolean): Promise<CommandResultInterface>;
     initDftInteractive(options: BaseRequestOptions, file: string, address: string, requestTicker: string, mintAmount: number, maxMints: number, mintHeight: number, mintBitworkc: string, mintBitworkr: string, WIF: string): Promise<CommandResultInterface>;
     initInfiniteDftInteractive(options: BaseRequestOptions, file: string, address: string, requestTicker: string, mintAmount: number, maxMints: number, mintHeight: number, mintBitworkVector: string, mintBitworkCommitIncrement: number, mintBitworkRevealIncrement: number, mintBitworkCommitIncrementStart: number | null, mintBitworkRevealIncrementStart: number | null, WIF: string, noImage?: boolean): Promise<CommandResultInterface>;
     initFixedDftInteractive(options: BaseRequestOptions, file: string, address: string, requestTicker: string, mintAmount: number, maxMints: number, mintHeight: number, mintBitworkCommit: string, mintBitworkReveal: string | null, WIF: string, noImage?: boolean): Promise<CommandResultInterface>;

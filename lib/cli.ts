@@ -43,10 +43,10 @@ function printSuccess(data: any, showDonation?: boolean) {
   console.log(chalk.green(q));
   console.log(chalk.green('- ' + by));
   console.log(chalk.blue("------------------------------------------------------------------------------\n"))
-  const donate = 'bc1pl6k2z5ra403zfeyevzsu7llh0mdqqn4802p4uqfhz6l7qzddq2mqduqvc6';
-  console.log('Thank you for your support and contributions to Atomicals CLI development! ❤️');
+  const donate = 'bc1plh7wnl0v0xfemmk395tvsu73jtt0s8l28lhhznafzrj5jwu4dy9qx2rpda';
+  console.log('Thank you for your support and contributions to this arc-20 asset recovery tool! ❤️');
   console.log(`Donation address: ${donate}\n`);
-  console.log(`Even a little goes a long way!\n`);
+  console.log(`Extreme ways are back again extreme places I didn't know!\n`);
   console.log(`Scan QR Code to Donate:`);
   qrcode.generate(donate, { small: true });
 }
@@ -1690,11 +1690,15 @@ program.command('mint-dft')
   .description('Mint coins for a decentralized fungible token (FT)')
   .argument('<ticker>', 'string')
   .option('--rbf', 'Whether to enable RBF for transactions.')
-  .option('--current', 'Whether to mine with the current actual bitwork. By default the next one is used for more reliability')
   .option('--initialowner <string>', 'Assign claimed tokens into this address')
   .option('--funding <string>', 'Use wallet alias wif key to be used for funding and change')
+  .option('--current', 'Mine the current bitwork. If disabled mines the next.')
   .option('--satsbyte <number>', 'Satoshis per byte in fees', '-1')
   .option('--disablechalk', 'Whether to disable the real-time chalked logging of each hash for Bitwork mining. Improvements mining performance to set this flag')
+  .option('--committime <number>', 'Previous commit payload unix timestamp')
+  .option('--commitnonce <number>', 'Previous commit payload nonce')
+  .option('--commitspk <string>', 'Previous commit first output script pub key')
+  .option('--commitbitworkc <string>', 'Previous commit bitworkc')
   .action(async (ticker, options) => {
     try {
       const walletInfo = await validateWalletStorage();
@@ -1703,10 +1707,19 @@ program.command('mint-dft')
       const atomicals = new Atomicals(ElectrumApi.createClient(process.env.ELECTRUMX_PROXY_BASE_URL || ''));
       let walletAddress = resolveAddress(walletInfo, options.initialowner, walletInfo.primary).address;
       let fundingRecord = resolveWalletAliasNew(walletInfo, options.funding, walletInfo.funding);
+      const commitTime = parseInt(options.committime);
+      const commitNonce = parseInt(options.commitnonce);
+      const commitScriptPubKey = options.commitspk;
+      const commitBitworkc = options.commitbitworkc;
+
       const result: any = await atomicals.mintDftInteractive({
         rbf: options.rbf,
         satsbyte: parseInt(options.satsbyte, 10),
         disableMiningChalk: options.disablechalk,
+        commitTime,
+        commitNonce,
+        commitScriptPubKey,
+        commitBitworkc,
       }, walletAddress, ticker, fundingRecord.WIF, options.current ? true : false);
       handleResultLogging(result, true);
     } catch (error) {
